@@ -1,0 +1,9 @@
+{
+  "block.uncrafting_table.uncrafting_table": "Uncrafting Table",
+  "container.uncrafting_table.uncrafting_table": "Uncrafting Table",
+  "item.uncrafting_table.basic_speed_card": "Basic Speed Card",
+  "item.uncrafting_table.advanced_speed_card": "Advanced Speed Card",
+  "item.uncrafting_table.elite_speed_card": "Elite Speed Card",
+  "item.uncrafting_table.ultimate_speed_card": "Ultimate Speed Card",
+  "item.uncrafting_table.creative_speed_card": "Creative Speed Card"
+}

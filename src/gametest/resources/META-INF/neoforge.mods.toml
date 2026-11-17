@@ -1,0 +1,15 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+
+[[mods]]
+modId = "uncrafting_table_gametest"
+version = "1.0.0"
+displayName = "Uncrafting Table GameTests"
+
+[[dependencies.uncrafting_table_gametest]]
+modId = "uncrafting_table"
+type = "required"
+versionRange = "[1.0,)"
+ordering = "AFTER"
+side = "BOTH"

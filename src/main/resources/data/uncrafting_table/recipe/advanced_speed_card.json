@@ -1,0 +1,24 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "RGR",
+    "GBG",
+    "RGR"
+  ],
+  "key": {
+    "R": {
+      "item": "minecraft:redstone"
+    },
+    "G": {
+      "item": "minecraft:gold_ingot"
+    },
+    "B": {
+      "item": "uncrafting_table:basic_speed_card"
+    }
+  },
+  "result": {
+    "id": "uncrafting_table:advanced_speed_card",
+    "count": 1
+  }
+}

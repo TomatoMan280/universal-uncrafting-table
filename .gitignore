@@ -1,0 +1,39 @@
+# Gradle & Build Outputs
+build/
+.gradle/
+out/
+bin/
+*.log
+hs_err_pid*.log
+
+# Local JDK & IDE Files
+.jdks/
+.idea/
+*.iml
+.vscode/
+.codex/
+.classpath
+.project
+.settings/
+
+# Minecraft Runtime & Extracted Sources
+run/
+run-gametest/
+run-data/
+temp_sources/
+tmp/
+src/generated/resources/.cache/
+
+# Extracted Third-Party Textures & Intermediate Render Caches
+curseforge_media/textures/
+curseforge_media/sprites/
+curseforge_media/renders/
+curseforge_media/__pycache__/
+curseforge_media/backup_old_logo.png
+__pycache__/
+*.pyc
+
+# Local Scratch Helpers
+download_mods.py
+implementation_plan.md
+walkthrough.md

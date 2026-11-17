@@ -1,0 +1,6 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "uncrafting_table:item/basic_speed_card"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": { "model": "uncrafting_table:block/uncrafting_table" },
+    "facing=south": { "model": "uncrafting_table:block/uncrafting_table", "y": 180 },
+    "facing=west":  { "model": "uncrafting_table:block/uncrafting_table", "y": 270 },
+    "facing=east":  { "model": "uncrafting_table:block/uncrafting_table", "y": 90 }
+  }
+}
