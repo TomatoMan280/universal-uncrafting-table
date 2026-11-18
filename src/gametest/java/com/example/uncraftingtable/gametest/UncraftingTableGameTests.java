@@ -710,4 +710,41 @@ public final class UncraftingTableGameTests {
                 "Breaking Uncrafting Table must drop items from 4x4 corner slots, book, upgrade, and modifier slots");
         helper.succeed();
     }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void performance16SlotsCacheAndReload(GameTestHelper helper) {
+        ServerLevel level = helper.getLevel();
+        Item[] items = {
+                Items.STONE_PICKAXE, Items.NETHERITE_SWORD, Items.DIAMOND_AXE, Items.IRON_CHESTPLATE,
+                Items.OAK_PLANKS, Items.COOKED_PORKCHOP, Items.GOLD_INGOT, Items.CHISELED_STONE_BRICKS,
+                Items.CRAFTING_TABLE, Items.FURNACE, Items.PISTON, Items.DISPENSER,
+                Items.SPYGLASS, Items.CROSSBOW, Items.SHIELD, Items.GLASS_BOTTLE
+        };
+
+        // Warm cache cleanly across all 16 slots
+        UncraftingRecipeResolver.clearCache();
+        for (Item item : items) {
+            UncraftingRecipeResolver.findRecipes(level, new ItemStack(item), true, true);
+        }
+
+        // Measure 500 full 16-slot sweeps (8,000 calls) -> must complete in < 250ms total
+        long startNs = System.nanoTime();
+        for (int pass = 0; pass < 500; pass++) {
+            for (Item item : items) {
+                List<ResolvedRecipe> res = UncraftingRecipeResolver.findRecipes(level, new ItemStack(item), true, true);
+                helper.assertTrue(res != null, "Cached lookup must never return null");
+            }
+        }
+        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+        helper.assertTrue(elapsedMs < 250,
+                "8,000 cached 4x4 findRecipes lookups took " + elapsedMs + "ms (expected < 250ms)");
+
+        // Verify clearCache + rebuild preserves identical results
+        UncraftingRecipeResolver.clearCache();
+        List<ResolvedRecipe> pickAfterClear = UncraftingRecipeResolver.findRecipes(level, new ItemStack(Items.STONE_PICKAXE), true, true);
+        helper.assertTrue(UncraftingRecipeResolver.hasMultipleChoices(pickAfterClear),
+                "Cache rebuild after clearCache must preserve Stone Pickaxe multi-recipe resolution");
+
+        helper.succeed();
+    }
 }

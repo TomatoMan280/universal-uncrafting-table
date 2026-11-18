@@ -33,13 +33,23 @@ import net.minecraft.world.item.Items;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTableMenu> {
     private static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(
             UncraftingTableMod.MOD_ID,
             "textures/gui/container/uncrafting_table.png"
     );
+
+    private static final ItemStack[] MODIFIER_GHOSTS = {
+            new ItemStack(Items.GRINDSTONE),
+            new ItemStack(Items.SMOKER),
+            new ItemStack(Items.BLAST_FURNACE),
+            new ItemStack(Items.BREWING_STAND)
+    };
 
     public enum ViewMode {
         MAIN,
@@ -48,19 +58,19 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
     }
 
     // List & Configure Window geometry (inside 256x228 panel)
-    private static final int LIST_X = 8;
-    private static final int LIST_Y = 28;
-    private static final int LIST_W = 178;
-    private static final int LIST_ROW_H = 32;
-    private static final int LIST_VISIBLE = 5;
+    static final int LIST_X = 8;
+    static final int LIST_Y = 28;
+    static final int LIST_W = 178;
+    static final int LIST_ROW_H = 32;
+    static final int LIST_VISIBLE = 5;
 
-    private static final int GHOST_X = 10;
-    private static final int GHOST_Y = 26;
-    private static final int OPT_X = 10;
-    private static final int OPT_Y = 48;
-    private static final int OPT_W = 236;
-    private static final int OPT_ROW_H = 20;
-    private static final int OPT_VISIBLE = 4;
+    static final int GHOST_X = 10;
+    static final int GHOST_Y = 26;
+    static final int OPT_X = 10;
+    static final int OPT_Y = 48;
+    static final int OPT_W = 236;
+    static final int OPT_ROW_H = 20;
+    static final int OPT_VISIBLE = 4;
 
     private ViewMode viewMode = ViewMode.MAIN;
     private boolean isAuto;
@@ -73,6 +83,26 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
     private boolean enableBrewingStand;
     private boolean waitForUnconfiguredChoice;
     private int syncedRuleCount = -1;
+
+    // Render-frame caches (avoid re-scanning RecipeManager 60+ FPS during mouse movement)
+    private record RulePreviewEntry(
+            RecipeRule rule,
+            boolean hasSmoker,
+            boolean hasBlast,
+            ItemStack targetStack,
+            List<ItemStack> outputs
+    ) {
+    }
+
+    private final ItemStack[] lastInputSnapshots = new ItemStack[UncraftingTableBlockEntity.INPUT_SLOTS];
+    private final int[] cachedInputDotColors = new int[UncraftingTableBlockEntity.INPUT_SLOTS];
+    private int cachedWaitingMultiCount = 0;
+    private boolean lastStatusSmoker = false;
+    private boolean lastStatusBlast = false;
+    private boolean lastStatusWait = false;
+    private int lastStatusRuleCount = -1;
+    private boolean inputStatusDirty = true;
+    private final Map<ResourceLocation, RulePreviewEntry> rulePreviewCache = new HashMap<>();
 
     // FILTER_LIST state
     private int listScroll = 0;
@@ -97,6 +127,7 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
         this.imageHeight = 228;
         this.inventoryLabelX = 47;
         this.inventoryLabelY = 135;
+        Arrays.fill(lastInputSnapshots, ItemStack.EMPTY);
         syncFieldsFromEntity();
     }
 
@@ -110,6 +141,8 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
         this.enableBrewingStand = menu.blockEntity.enableBrewingStand;
         this.waitForUnconfiguredChoice = menu.blockEntity.waitForUnconfiguredChoice;
         this.syncedRuleCount = menu.blockEntity.getRecipeRules().size();
+        this.inputStatusDirty = true;
+        this.rulePreviewCache.clear();
     }
 
     private boolean hasEntityStateChanged() {
@@ -460,6 +493,8 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
         }
 
         menu.blockEntity.saveRecipeRule(itemId, chosen.recipeId(), matIds);
+        this.inputStatusDirty = true;
+        this.rulePreviewCache.clear();
         PacketDistributor.sendToServer(new UncraftingSelectionPayload(
                 menu.blockEntity.getBlockPos(),
                 UncraftingSelectionPayload.Action.SAVE,
@@ -650,12 +685,6 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
 
     @Override
     protected void renderBg(GuiGraphics guiGraphics, float partialTick, int mouseX, int mouseY) {
-        if (hasEntityStateChanged()) {
-            syncFieldsFromEntity();
-            this.clearWidgets();
-            this.init();
-        }
-
         if (viewMode == ViewMode.MAIN) {
             renderMainBg(guiGraphics, mouseX, mouseY);
         } else if (viewMode == ViewMode.FILTER_LIST) {
@@ -684,34 +713,30 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
             guiGraphics.fill(px, py, px + 1, py + ph, 0xFF000000);
         }
 
-        // Ghost icons for empty modifier slots
-        if (menu.getSlot(UncraftingTableBlockEntity.GRINDSTONE_SLOT).getItem().isEmpty()) {
-            guiGraphics.renderFakeItem(new ItemStack(Items.GRINDSTONE), leftPos + 164, topPos + 105);
-        }
-        if (menu.getSlot(UncraftingTableBlockEntity.SMOKER_SLOT).getItem().isEmpty()) {
-            guiGraphics.renderFakeItem(new ItemStack(Items.SMOKER), leftPos + 182, topPos + 105);
-        }
-        if (menu.getSlot(UncraftingTableBlockEntity.BLAST_FURNACE_SLOT).getItem().isEmpty()) {
-            guiGraphics.renderFakeItem(new ItemStack(Items.BLAST_FURNACE), leftPos + 200, topPos + 105);
-        }
-        if (menu.getSlot(UncraftingTableBlockEntity.BREWING_STAND_SLOT).getItem().isEmpty()) {
-            guiGraphics.renderFakeItem(new ItemStack(Items.BREWING_STAND), leftPos + 218, topPos + 105);
+        // Station modifier boxes: brighten when occupied, show dimmed ghost when empty
+        for (int i = 0; i < MODIFIER_GHOSTS.length; i++) {
+            int sx = leftPos + 164 + i * 18;
+            int sy = topPos + 105;
+            boolean present = !menu.getSlot(UncraftingTableBlockEntity.GRINDSTONE_SLOT + i).getItem().isEmpty();
+            if (present) {
+                guiGraphics.fill(sx - 1, sy - 1, sx + 17, sy + 17, 0xFF4ADE80);
+                guiGraphics.fill(sx, sy, sx + 16, sy + 16, 0xFF2D5E3C);
+                guiGraphics.fill(sx, sy, sx + 16, sy + 1, 0xFF3E8053);
+                guiGraphics.fill(sx, sy, sx + 1, sy + 16, 0xFF3E8053);
+            } else {
+                guiGraphics.renderFakeItem(MODIFIER_GHOSTS[i], sx, sy);
+            }
         }
 
-        // Ghost overlay shade
+        // Dim overlay shade over empty station ghost icons
         guiGraphics.pose().pushPose();
         guiGraphics.pose().translate(0, 0, 250.0F);
-        if (menu.getSlot(UncraftingTableBlockEntity.GRINDSTONE_SLOT).getItem().isEmpty()) {
-            guiGraphics.fill(leftPos + 164, topPos + 105, leftPos + 180, topPos + 121, 0x44000000);
-        }
-        if (menu.getSlot(UncraftingTableBlockEntity.SMOKER_SLOT).getItem().isEmpty()) {
-            guiGraphics.fill(leftPos + 182, topPos + 105, leftPos + 198, topPos + 121, 0x44000000);
-        }
-        if (menu.getSlot(UncraftingTableBlockEntity.BLAST_FURNACE_SLOT).getItem().isEmpty()) {
-            guiGraphics.fill(leftPos + 200, topPos + 105, leftPos + 216, topPos + 121, 0x44000000);
-        }
-        if (menu.getSlot(UncraftingTableBlockEntity.BREWING_STAND_SLOT).getItem().isEmpty()) {
-            guiGraphics.fill(leftPos + 218, topPos + 105, leftPos + 234, topPos + 121, 0x44000000);
+        for (int i = 0; i < MODIFIER_GHOSTS.length; i++) {
+            if (menu.getSlot(UncraftingTableBlockEntity.GRINDSTONE_SLOT + i).getItem().isEmpty()) {
+                int sx = leftPos + 164 + i * 18;
+                int sy = topPos + 105;
+                guiGraphics.fill(sx, sy, sx + 16, sy + 16, 0x66000000);
+            }
         }
         guiGraphics.pose().popPose();
 
@@ -735,72 +760,71 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
         guiGraphics.drawString(font, energyText, (int) scaledX, (int) scaledY, 0xFF4444, false);
         guiGraphics.pose().popPose();
 
-        // Subtle status box below Recipes (N) button (x=87, y=86, w=70, h=42)
-        drawRecessedBox(guiGraphics, leftPos + 87, topPos + 86, 70, 42);
-        int waitingCount = countUnconfiguredMultiItems();
-        boolean hasSmoker = menu.blockEntity.hasSmokerModifier();
-        boolean hasBlast = menu.blockEntity.hasBlastFurnaceModifier();
+        // Refresh cached multi-recipe corner dot colors on the 4x4 input grid
+        refreshInputStatusIfNeeded();
 
+        // Corner status indicators on 4x4 Input slots using precomputed colors
         guiGraphics.pose().pushPose();
-        guiGraphics.pose().scale(0.62f, 0.62f, 1.0f);
-        String modeLine = waitForUnconfiguredChoice ? "Unset: Wait" : "Unset: Default";
-        int modeColor = waitForUnconfiguredChoice ? 0xFFFBBF24 : 0xFF9FB0C3;
-        guiGraphics.drawString(font, modeLine,
-                (int) ((leftPos + 122) / 0.62f - font.width(modeLine) / 2.0f),
-                (int) ((topPos + 92) / 0.62f), modeColor, false);
-
-        String subLine = waitingCount > 0 ? (waitingCount + " multi in input") : "Filters active";
-        int subColor = (waitingCount > 0 && waitForUnconfiguredChoice) ? 0xFFFBBF24 : 0xFF86EFAC;
-        guiGraphics.drawString(font, subLine,
-                (int) ((leftPos + 122) / 0.62f - font.width(subLine) / 2.0f),
-                (int) ((topPos + 104) / 0.62f), subColor, false);
-
-        String hintLine = "Pipes follow rules";
-        guiGraphics.drawString(font, hintLine,
-                (int) ((leftPos + 122) / 0.62f - font.width(hintLine) / 2.0f),
-                (int) ((topPos + 116) / 0.62f), 0xFF6B7280, false);
-        guiGraphics.pose().popPose();
-
-        // Corner status indicators on 4x4 Input slots (Green = saved rule, Amber = unset multi-recipe)
-        if (minecraft != null && minecraft.level != null) {
-            guiGraphics.pose().pushPose();
-            guiGraphics.pose().translate(0, 0, 260.0F);
-            for (int slot = UncraftingTableBlockEntity.INPUT_START_SLOT; slot <= UncraftingTableBlockEntity.INPUT_END_SLOT; slot++) {
-                ItemStack stack = menu.blockEntity.itemHandler.getStackInSlot(slot);
-                if (stack.isEmpty() || stack.is(UncraftingTableBlockEntity.BLACKLIST_TAG)) continue;
-                int col = slot % UncraftingTableBlockEntity.INPUT_COLS;
-                int row = slot / UncraftingTableBlockEntity.INPUT_COLS;
-                int dotX = leftPos + 8 + col * 18 + 13;
-                int dotY = topPos + 20 + row * 18;
-                if (menu.blockEntity.hasRuleFor(stack)) {
-                    guiGraphics.fill(dotX, dotY, dotX + 3, dotY + 3, 0xFF4ADE80);
-                } else {
-                    List<ResolvedRecipe> recipes = UncraftingRecipeResolver.findRecipes(minecraft.level, stack, hasSmoker, hasBlast);
-                    if (UncraftingRecipeResolver.hasMultipleChoices(recipes)) {
-                        guiGraphics.fill(dotX, dotY, dotX + 3, dotY + 3, waitForUnconfiguredChoice ? 0xFFFACC15 : 0xFF38BDF8);
-                    }
-                }
-            }
-            guiGraphics.pose().popPose();
+        guiGraphics.pose().translate(0, 0, 260.0F);
+        for (int i = 0; i < UncraftingTableBlockEntity.INPUT_SLOTS; i++) {
+            int dotColor = cachedInputDotColors[i];
+            if (dotColor == 0) continue;
+            int col = i % UncraftingTableBlockEntity.INPUT_COLS;
+            int row = i / UncraftingTableBlockEntity.INPUT_COLS;
+            int dotX = leftPos + 8 + col * 18 + 13;
+            int dotY = topPos + 20 + row * 18;
+            guiGraphics.fill(dotX, dotY, dotX + 3, dotY + 3, dotColor);
         }
+        guiGraphics.pose().popPose();
     }
 
-    private int countUnconfiguredMultiItems() {
-        if (minecraft == null || minecraft.level == null) return 0;
-        int count = 0;
+    private void refreshInputStatusIfNeeded() {
+        if (minecraft == null || minecraft.level == null) return;
         boolean hasSmoker = menu.blockEntity.hasSmokerModifier();
         boolean hasBlast = menu.blockEntity.hasBlastFurnaceModifier();
-        for (int slot = UncraftingTableBlockEntity.INPUT_START_SLOT; slot <= UncraftingTableBlockEntity.INPUT_END_SLOT; slot++) {
-            ItemStack stack = menu.blockEntity.itemHandler.getStackInSlot(slot);
-            if (stack.isEmpty() || stack.is(UncraftingTableBlockEntity.BLACKLIST_TAG) || menu.blockEntity.hasRuleFor(stack)) {
-                continue;
-            }
-            List<ResolvedRecipe> recipes = UncraftingRecipeResolver.findRecipes(minecraft.level, stack, hasSmoker, hasBlast);
-            if (UncraftingRecipeResolver.hasMultipleChoices(recipes)) {
-                count++;
+        int ruleCount = menu.blockEntity.getRecipeRules().size();
+
+        boolean changed = inputStatusDirty
+                || hasSmoker != lastStatusSmoker
+                || hasBlast != lastStatusBlast
+                || waitForUnconfiguredChoice != lastStatusWait
+                || ruleCount != lastStatusRuleCount;
+
+        if (!changed) {
+            for (int i = 0; i < UncraftingTableBlockEntity.INPUT_SLOTS; i++) {
+                ItemStack cur = menu.blockEntity.itemHandler.getStackInSlot(UncraftingTableBlockEntity.INPUT_START_SLOT + i);
+                if (!ItemStack.isSameItemSameComponents(lastInputSnapshots[i], cur)) {
+                    changed = true;
+                    break;
+                }
             }
         }
-        return count;
+        if (!changed) return;
+
+        lastStatusSmoker = hasSmoker;
+        lastStatusBlast = hasBlast;
+        lastStatusWait = waitForUnconfiguredChoice;
+        lastStatusRuleCount = ruleCount;
+        inputStatusDirty = false;
+
+        int waiting = 0;
+        for (int i = 0; i < UncraftingTableBlockEntity.INPUT_SLOTS; i++) {
+            ItemStack stack = menu.blockEntity.itemHandler.getStackInSlot(UncraftingTableBlockEntity.INPUT_START_SLOT + i);
+            lastInputSnapshots[i] = stack.isEmpty() ? ItemStack.EMPTY : stack.copyWithCount(1);
+            cachedInputDotColors[i] = 0;
+            if (stack.isEmpty() || stack.is(UncraftingTableBlockEntity.BLACKLIST_TAG)) continue;
+
+            if (menu.blockEntity.hasRuleFor(stack)) {
+                cachedInputDotColors[i] = 0xFF4ADE80;
+            } else {
+                List<ResolvedRecipe> recipes = UncraftingRecipeResolver.findRecipes(minecraft.level, stack, hasSmoker, hasBlast);
+                if (UncraftingRecipeResolver.hasMultipleChoices(recipes)) {
+                    cachedInputDotColors[i] = waitForUnconfiguredChoice ? 0xFFFACC15 : 0xFF38BDF8;
+                    waiting++;
+                }
+            }
+        }
+        cachedWaitingMultiCount = waiting;
     }
 
     private void renderFilterListBg(GuiGraphics guiGraphics, int mouseX, int mouseY) {
@@ -836,8 +860,8 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
             guiGraphics.fill(rx, ry, rx + rw, ry + LIST_ROW_H - 1, border);
             guiGraphics.fill(rx + 1, ry + 1, rx + rw - 1, ry + LIST_ROW_H - 2, bg);
 
-            Item targetItem = BuiltInRegistries.ITEM.get(rule.itemId());
-            ItemStack targetStack = new ItemStack(targetItem);
+            RulePreviewEntry preview = getCachedRulePreview(rule);
+            ItemStack targetStack = preview.targetStack();
             guiGraphics.renderFakeItem(targetStack, rx + 4, ry + 7);
 
             guiGraphics.pose().pushPose();
@@ -847,7 +871,7 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
             guiGraphics.pose().popPose();
 
             // Render chosen output icons cleanly
-            List<ItemStack> outPreview = resolveRulePreviewOutputs(targetStack, rule);
+            List<ItemStack> outPreview = preview.outputs();
             guiGraphics.drawString(font, "->", rx + 23, ry + 14, 0xFF4ADE80, false);
             int maxIcons = Math.min(5, outPreview.size());
             for (int o = 0; o < maxIcons; o++) {
@@ -876,6 +900,20 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
             int thumbY = barY + ((barH - thumbH) * listScroll) / maxScroll;
             guiGraphics.fill(barX, thumbY, barX + 3, thumbY + thumbH, 0xFF64748B);
         }
+    }
+
+    private RulePreviewEntry getCachedRulePreview(RecipeRule rule) {
+        boolean hasSmoker = menu.blockEntity.hasSmokerModifier();
+        boolean hasBlast = menu.blockEntity.hasBlastFurnaceModifier();
+        RulePreviewEntry cached = rulePreviewCache.get(rule.itemId());
+        if (cached != null && cached.rule().equals(rule) && cached.hasSmoker() == hasSmoker && cached.hasBlast() == hasBlast) {
+            return cached;
+        }
+        ItemStack targetStack = new ItemStack(BuiltInRegistries.ITEM.get(rule.itemId()));
+        List<ItemStack> outputs = resolveRulePreviewOutputs(targetStack, rule);
+        RulePreviewEntry created = new RulePreviewEntry(rule, hasSmoker, hasBlast, targetStack, List.copyOf(outputs));
+        rulePreviewCache.put(rule.itemId(), created);
+        return created;
     }
 
     private List<ItemStack> resolveRulePreviewOutputs(ItemStack targetStack, RecipeRule rule) {
@@ -1064,6 +1102,9 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
             this.clearWidgets();
             this.init();
         }
+        if (viewMode == ViewMode.MAIN) {
+            refreshInputStatusIfNeeded();
+        }
     }
 
     @Override
@@ -1128,12 +1169,12 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
             RecipeRule rule = rules.get(listScroll + i);
             int rx = LIST_X + 2;
             int ry = LIST_Y + 2 + i * LIST_ROW_H;
-            ItemStack target = new ItemStack(BuiltInRegistries.ITEM.get(rule.itemId()));
+            RulePreviewEntry preview = getCachedRulePreview(rule);
             if (isHovering(rx + 4, ry + 7, 16, 16, mouseX, mouseY)) {
-                guiGraphics.renderTooltip(this.font, target, mouseX, mouseY);
+                guiGraphics.renderTooltip(this.font, preview.targetStack(), mouseX, mouseY);
                 return;
             }
-            List<ItemStack> outs = resolveRulePreviewOutputs(target, rule);
+            List<ItemStack> outs = preview.outputs();
             int maxIcons = Math.min(5, outs.size());
             for (int o = 0; o < maxIcons; o++) {
                 if (isHovering(rx + 36 + o * 18, ry + 12, 16, 16, mouseX, mouseY)) {
@@ -1175,5 +1216,63 @@ public class UncraftingTableScreen extends AbstractContainerScreen<UncraftingTab
                 }
             }
         }
+    }
+
+    // Package-private inspection helpers for automated client UI tests
+    ViewMode getViewModeForTest() {
+        return viewMode;
+    }
+
+    ItemStack getGhostStackForTest() {
+        return ghostStack;
+    }
+
+    List<ConcreteOutput> getEditOptionsForTest() {
+        return editOptions;
+    }
+
+    int getSelectedOptionIdxForTest() {
+        return selectedOptionIdx;
+    }
+
+    boolean isShowingSettingsPanelForTest() {
+        return showSettingsPanel;
+    }
+
+    boolean isStationSlotOccupiedForTest(int modifierIndex) {
+        if (modifierIndex < 0 || modifierIndex >= MODIFIER_GHOSTS.length) {
+            return false;
+        }
+        return !menu.getSlot(UncraftingTableBlockEntity.GRINDSTONE_SLOT + modifierIndex).getItem().isEmpty();
+    }
+
+    int getCachedWaitingMultiCountForTest() {
+        return cachedWaitingMultiCount;
+    }
+
+    int getEditScrollForTest() {
+        return editScroll;
+    }
+
+    void setEditScrollForTest(int scroll) {
+        this.editScroll = Math.max(0, Math.min(Math.max(0, editOptions.size() - OPT_VISIBLE), scroll));
+    }
+
+    int getLeftPosForTest() {
+        return leftPos;
+    }
+
+    int getTopPosForTest() {
+        return topPos;
+    }
+
+    List<String> getWidgetLabelsForTest() {
+        List<String> labels = new ArrayList<>();
+        for (var listener : this.children()) {
+            if (listener instanceof Button btn) {
+                labels.add(btn.getMessage().getString());
+            }
+        }
+        return labels;
     }
 }

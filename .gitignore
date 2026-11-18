@@ -19,9 +19,12 @@ hs_err_pid*.log
 # Minecraft Runtime & Extracted Sources
 run/
 run-gametest/
+run-atm10-test/
 run-data/
 temp_sources/
 tmp/
+uncrafting_test_report.txt
+uncrafting_client_gui_report.txt
 src/generated/resources/.cache/
 
 # Extracted Third-Party Textures & Intermediate Render Caches

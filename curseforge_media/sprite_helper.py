@@ -209,13 +209,6 @@ def render_accurate_gui(out_path, scale=4):
     draw_mc_button(canvas, btn_norm, ox + 87, 40, 70, 18, "Auto: ON", font, text_color=(140, 255, 140))
     draw_mc_button(canvas, btn_norm, ox + 87, 62, 70, 20, "Recipes (3)", font, text_color=(255, 255, 255))
 
-    # Recessed status box below Recipes (3) (x=87, y=86, w=70, h=42)
-    draw.rectangle([ox + 87, 86, ox + 156, 127], fill=(24, 25, 28, 255))
-    draw.line([(ox + 87, 86), (ox + 156, 86)], fill=(15, 16, 18, 255))
-    draw.line([(ox + 87, 86), (ox + 87, 127)], fill=(15, 16, 18, 255))
-    draw.line([(ox + 87, 127), (ox + 156, 127)], fill=(45, 48, 52, 255))
-    draw.line([(ox + 156, 86), (ox + 156, 127)], fill=(45, 48, 52, 255))
-
     # Cog gear icon at (7, 5)
     gear_pts = [
         (3,1),(4,1),(6,1),(7,1),
@@ -231,9 +224,14 @@ def render_accurate_gui(out_path, scale=4):
     for gx, gy in gear_pts:
         canvas.putpixel((ox + 7 + gx, 5 + gy), (255, 215, 0, 255))
 
-    # 4 Modifier checkboxes (x=164+i*18+4, y=123)
+    # 4 Modifier brightened active slot boxes & checkboxes below (x=164+i*18, y=105 / y=123)
     for i in range(4):
-        cx, cy = ox + 164 + i * 18 + 4, 123
+        sx = ox + 164 + i * 18
+        draw.rectangle([sx - 1, 104, sx + 16, 121], fill=(74, 222, 128, 255))
+        draw.rectangle([sx, 105, sx + 15, 120], fill=(45, 94, 60, 255))
+        draw.line([(sx, 105), (sx + 15, 105)], fill=(62, 128, 83, 255))
+        draw.line([(sx, 105), (sx, 120)], fill=(62, 128, 83, 255))
+        cx, cy = sx + 4, 123
         draw.rectangle([cx, cy, cx + 7, cy + 7], fill=(34, 34, 34, 255))
         draw.rectangle([cx + 1, cy + 1, cx + 6, cy + 6], fill=(82, 86, 92, 255))
 
@@ -296,11 +294,6 @@ def render_accurate_gui(out_path, scale=4):
     _place_item(big, font, scale, "advanced_speed_card", ox + 65, 203)
     _place_item(big, font, scale, "elite_speed_card", ox + 83, 203)
     _place_item(big, font, scale, "spruce_planks", ox + 173, 203, 8)
-
-    # Status box micro lines inside recessed box below Recipes (3)
-    _draw_micro_text(big, font, scale, "Unset: Default", ox + 122, 92, 0.62, (159, 176, 195), centered=True)
-    _draw_micro_text(big, font, scale, "1 multi in input", ox + 122, 104, 0.62, (134, 239, 172), centered=True)
-    _draw_micro_text(big, font, scale, "Pipes follow rules", ox + 122, 116, 0.62, (107, 114, 128), centered=True)
 
     # Energy text ("10000 / 10000 FE") at x=203, y=95
     _draw_micro_text(big, font, scale, "10000 / 10000 FE", ox + 203, 95, 0.55, (255, 68, 68), centered=True)

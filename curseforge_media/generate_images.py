@@ -331,7 +331,7 @@ def html_gui_tour():
     p_panel  = pt(2, 22)     # Clean left edge of Settings Panel
     p_input  = pt(94, 62)    # Input 4x4 left edge (cleanly below Settings Panel)
     p_books  = pt(102, 113)  # Books & Speed slots
-    p_picker = pt(208, 128)  # Bottom of Recipes (3) status box
+    p_picker = pt(208, 82)   # Bottom of Recipes (3) button
     p_btns   = pt(173, 30)   # Uncraft/Auto left edge
     p_gap1_x = pt(157, 0)[0] # Center between "Input" (144) and "Uncrafting Table" (170)
     p_gap2_x = pt(169, 0)[0] # Center between Input 4x4 (166) and Uncraft button (173)
@@ -387,8 +387,8 @@ def html_gui_tour():
     <p>Insert Books to extract enchantments, and Speed Cards for up to <b>1 item/tick</b> auto speed.</p>
   </div>
   <div class="ann" style="left: 52px; top: 830px; border-color: rgba(56, 189, 248, 0.55);">
-    <div class="ann-head"><span class="num" style="background:#0369a1;border-color:#38bdf8;">4</span><h3>Recipes (N) &amp; Filter Status</h3></div>
-    <p>Open the Pipez-style <b>Recipe Filters</b> list. Status box tracks saved rules &amp; Auto Default / Wait policy.</p>
+    <div class="ann-head"><span class="num" style="background:#0369a1;border-color:#38bdf8;">4</span><h3>Recipes (N) Filters</h3></div>
+    <p>Open the Pipez-style <b>Recipe Filters</b> list to pick exact output recipes &amp; Auto Default / Wait policy.</p>
   </div>
 
   <!-- Right Annotations -->

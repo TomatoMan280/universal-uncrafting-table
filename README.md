@@ -52,29 +52,40 @@ Full player control over multi-recipe items — even when piped automatically fr
 ### Automation, Mod Compatibility & Exploit Safety
 - **Pipe & Hopper Safe Capabilities:** External automation can only insert into Input (`0–15`) & Book (`32`) slots and extract from Output (`16–31`), keeping Speed Cards and Modifiers safe.
 - **Universal & Custom Recipe Support:** Resolves Vanilla recipes, modded custom `RecipeType`s, `SizedIngredient`s, `Stonecutting`, deterministic custom outputs, and **Iron's Gems 'n Jewelry** (`irons_jewelry:jewelry_data`).
-- **Anti-Exploit & Blacklist (`#uncrafting_table:blacklist`):** Blocks self-referential crafting loops, rejects RNG-chance outputs, and safely moves blacklisted or uncraftable items intact to Output without voiding gear.
+- **Automated Station Modifier Feedback & Gating:** Grindstone, Smoker, Blast Furnace, and Brewing Stand slots highlight when occupied, while gating enchanted gear, cooked/alloy-smelted foods, blasted ores, and 3-bottle potion sets cleanly.
 
 ---
 
 ## Building & Running Tests
 
-Requirements: **Java 21+**
+Requirements: **Java 21+** (and PowerShell on Windows for `scripts/run_automated_tests.ps1`).
 
 ```bash
-# Build mod JAR (also runs JUnit tests)
+# Build mod JAR (also runs JUnit 5 tests)
 ./gradlew build
 
-# Run JUnit 5 unit & compatibility tests
+# Run full automated Vanilla verification (JUnit + 16 GameTests + 1,495-item sweep + JAR build)
+./gradlew verifyAllVanilla
+
+# Run JUnit 5 unit & compatibility tests only
 ./gradlew test
 
 # Run NeoForge in-world GameTest suite
 ./gradlew runGameTestServer
 
-# Run client with JEI
+# Run automated Client GUI & cursor-latency verifier (launches client, tests UI, exits cleanly)
+./gradlew runClient -PclientAutoTest=true
+
+# Run normal playable client with JEI
 ./gradlew runClient
 ```
 
-In-game admin sweep command:
+One-command local + ATM10 automated test suite (runs Vanilla JUnit/GameTests, live Client GUI/render test, and separate ATM10 full-pack registry sweep cleanly without touching your saves):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_automated_tests.ps1 -Suite All -InstallToAtm10
 ```
-/testuncrafting
-```
+
+In-game commands:
+- `/testuncrafting` — Runs the full item + Iron's Gems 'n Jewelry pattern sweep across every registered item (`uncrafting_test_report.txt`; also auto-runs on world load for worlds with `test` in the level name or `-Duncrafting_table.autoSweepOnWorldLoad=true`).
+- `/testuncraftinggui` — Runs the live GUI interaction, Pipez recipe filter, and cursor render speed check in-game (`uncrafting_client_gui_report.txt`).

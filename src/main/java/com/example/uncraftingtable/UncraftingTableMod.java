@@ -87,7 +87,8 @@ public final class UncraftingTableMod {
         modEventBus.addListener(this::addCreativeTabItems);
         modEventBus.addListener(this::registerCapabilities);
 
-        net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener(com.example.uncraftingtable.command.UncraftingTestCommand::onRegisterCommands);
+        net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.OnDatapackSyncEvent e) ->
+                com.example.uncraftingtable.recipe.UncraftingRecipeResolver.clearCache());
     }
 
     private void addCreativeTabItems(BuildCreativeModeTabContentsEvent event) {

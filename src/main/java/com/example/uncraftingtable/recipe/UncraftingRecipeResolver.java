@@ -20,6 +20,7 @@ import net.minecraft.world.item.crafting.CraftingRecipe;
 import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
+import net.minecraft.world.item.crafting.RecipeManager;
 import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.item.crafting.SingleItemRecipe;
 import net.minecraft.world.item.crafting.SmithingTransformRecipe;
@@ -28,27 +29,150 @@ import net.neoforged.neoforge.common.crafting.SizedIngredient;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Resolves all valid uncrafting recipes for an ItemStack, including:
- * - Standard Minecraft Crafting, Smithing, Stonecutting, Smoking, Blasting, Smelting
- * - Modded custom RecipeTypes (via reflection on SizedIngredient, Ingredient, ItemStack, and custom outputs)
- * - Dynamic DataComponent crafting systems such as Iron's Gems 'n Jewelry (irons_jewelry:jewelry_data)
- * Also groups identical ingredients and exposes selectable variants (e.g., wood types, stone types).
+ * - Standard Minecraft Crafting, Smithing, Stonecutting, Smoking, Blasting,
+ * Smelting
+ * - Modded custom RecipeTypes (via reflection on SizedIngredient, Ingredient,
+ * ItemStack, and custom outputs)
+ * - Dynamic DataComponent crafting systems such as Iron's Gems 'n Jewelry
+ * (irons_jewelry:jewelry_data)
+ * Also groups identical ingredients and exposes selectable variants (e.g., wood
+ * types, stone types).
  */
 public final class UncraftingRecipeResolver {
 
-    private static final ResourceLocation IRONS_JEWELRY_DATA_ID =
-            ResourceLocation.fromNamespaceAndPath("irons_jewelry", "jewelry_data");
+    private static final ResourceLocation IRONS_JEWELRY_DATA_ID = ResourceLocation.fromNamespaceAndPath("irons_jewelry",
+            "jewelry_data");
+
+    private static final Set<String> SINGLE_OUT_METHOD_NAMES = Set.of(
+            "getResult", "result", "getOutput", "output", "getOutputItem", "outputItem");
+    private static final Set<String> LIST_OUT_METHOD_NAMES = Set.of(
+            "getResults", "getRollableResults", "results", "outputs");
+    private static final List<String> COUNT_METHOD_NAMES = List.of(
+            "count", "amount", "getCount", "getAmount");
+
+    private static final Map<Class<?>, RecipeReflectMeta> RECIPE_META_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, WrapperMeta> WRAPPER_META_CACHE = new ConcurrentHashMap<>();
+    private static final Map<RecipeManager, IndexedRecipes> MANAGER_INDEX_CACHE = Collections
+            .synchronizedMap(new WeakHashMap<>());
+
+    private record QueryKey(Item item, boolean hasSmoker, boolean hasBlastFurnace) {
+    }
+
+    private static final class IndexedRecipes {
+        final Collection<RecipeHolder<?>> recipesRef;
+        final int recipesSize;
+        final Map<Item, List<RecipeHolder<?>>> byResultItem;
+        final Map<QueryKey, List<ResolvedRecipe>> resolvedCache = new ConcurrentHashMap<>();
+
+        IndexedRecipes(Collection<RecipeHolder<?>> recipesRef, int recipesSize,
+                Map<Item, List<RecipeHolder<?>>> byResultItem) {
+            this.recipesRef = recipesRef;
+            this.recipesSize = recipesSize;
+            this.byResultItem = byResultItem;
+        }
+    }
+
+    private record RecipeReflectMeta(
+            List<Method> singleOutMethods,
+            List<Method> listOutMethods,
+            List<Field> outputFields,
+            List<Field> inputFields) {
+        static RecipeReflectMeta get(Class<?> recipeClass) {
+            return RECIPE_META_CACHE.computeIfAbsent(recipeClass, cls -> {
+                List<Method> singleOut = new ArrayList<>();
+                List<Method> listOut = new ArrayList<>();
+                List<Field> outFields = new ArrayList<>();
+                List<Field> inFields = new ArrayList<>();
+                Class<?> cur = cls;
+                while (cur != null && cur != Object.class) {
+                    for (Method m : cur.getDeclaredMethods()) {
+                        if (m.getParameterCount() != 0 || Modifier.isStatic(m.getModifiers()))
+                            continue;
+                        String name = m.getName();
+                        if (SINGLE_OUT_METHOD_NAMES.contains(name)) {
+                            m.setAccessible(true);
+                            singleOut.add(m);
+                        } else if (LIST_OUT_METHOD_NAMES.contains(name)) {
+                            m.setAccessible(true);
+                            listOut.add(m);
+                        }
+                    }
+                    for (Field f : cur.getDeclaredFields()) {
+                        if (Modifier.isStatic(f.getModifiers()))
+                            continue;
+                        String fname = f.getName().toLowerCase();
+                        f.setAccessible(true);
+                        if (fname.contains("result") || fname.contains("output")) {
+                            outFields.add(f);
+                        } else if (!fname.contains("rollable")) {
+                            inFields.add(f);
+                        }
+                    }
+                    cur = cur.getSuperclass();
+                }
+                return new RecipeReflectMeta(
+                        List.copyOf(singleOut), List.copyOf(listOut),
+                        List.copyOf(outFields), List.copyOf(inFields));
+            });
+        }
+    }
+
+    private record WrapperMeta(Method getStackMethod, Method getChanceMethod, Method ingredientMethod,
+            Method countMethod) {
+        static WrapperMeta get(Class<?> wrapperClass) {
+            return WRAPPER_META_CACHE.computeIfAbsent(wrapperClass, cls -> {
+                Method getStack = null;
+                Method getChance = null;
+                Method ingredient = null;
+                Map<String, Method> foundCountMethods = new HashMap<>();
+                for (Method m : cls.getMethods()) {
+                    if (m.getParameterCount() != 0)
+                        continue;
+                    String name = m.getName();
+                    if ("getStack".equals(name))
+                        getStack = m;
+                    else if ("getChance".equals(name))
+                        getChance = m;
+                    else if ("ingredient".equals(name))
+                        ingredient = m;
+                    else if (COUNT_METHOD_NAMES.contains(name))
+                        foundCountMethods.put(name, m);
+                }
+                Method count = null;
+                for (String cName : COUNT_METHOD_NAMES) {
+                    if (foundCountMethods.containsKey(cName)) {
+                        count = foundCountMethods.get(cName);
+                        break;
+                    }
+                }
+                return new WrapperMeta(getStack, getChance, ingredient, count);
+            });
+        }
+    }
+
+    /**
+     * Clear cached RecipeManager indexes (called on datapack reload / recipe sync).
+     */
+    public static void clearCache() {
+        MANAGER_INDEX_CACHE.clear();
+    }
 
     private UncraftingRecipeResolver() {
     }
@@ -72,12 +196,12 @@ public final class UncraftingRecipeResolver {
             String sourceLabel,
             int inputCost,
             List<IngredientGroup> groups,
-            int totalIngredientCount
-    ) {
+            int totalIngredientCount) {
     }
 
     /**
-     * A concrete selectable output choice (recipe + chosen variant per group) for the Recipe Filter UI.
+     * A concrete selectable output choice (recipe + chosen variant per group) for
+     * the Recipe Filter UI.
      */
     public record ConcreteOutput(
             ResourceLocation recipeId,
@@ -86,22 +210,26 @@ public final class UncraftingRecipeResolver {
             List<ItemStack> outputs,
             List<ResourceLocation> chosenMaterialIds,
             ResolvedRecipe sourceRecipe,
-            boolean hasInlineGroupSwatches
-    ) {
+            boolean hasInlineGroupSwatches) {
     }
 
     public static boolean hasMultipleChoices(List<ResolvedRecipe> recipes) {
-        if (recipes.size() > 1) return true;
-        if (recipes.isEmpty()) return false;
+        if (recipes.size() > 1)
+            return true;
+        if (recipes.isEmpty())
+            return false;
         for (IngredientGroup g : recipes.get(0).groups()) {
-            if (g.hasChoices()) return true;
+            if (g.hasChoices())
+                return true;
         }
         return false;
     }
 
     /**
-     * Expand matching recipes and tag variants into deduplicated concrete output rows (up to 64 combinations per recipe).
-     * Recipes with >64 combinations stay a single row with inline clickable swatches so UI never lags.
+     * Expand matching recipes and tag variants into deduplicated concrete output
+     * rows (up to 64 combinations per recipe).
+     * Recipes with >64 combinations stay a single row with inline clickable
+     * swatches so UI never lags.
      */
     public static List<ConcreteOutput> expandOutputOptions(List<ResolvedRecipe> recipes) {
         List<ConcreteOutput> out = new ArrayList<>();
@@ -112,7 +240,8 @@ public final class UncraftingRecipeResolver {
             long combos = 1;
             for (IngredientGroup g : groups) {
                 combos *= Math.max(1, g.variants().size());
-                if (combos > 64) break;
+                if (combos > 64)
+                    break;
             }
 
             if (combos <= 64) {
@@ -134,8 +263,7 @@ public final class UncraftingRecipeResolver {
                     if (seenFingerprints.add(fp.toString())) {
                         out.add(new ConcreteOutput(
                                 recipe.id(), recipe.sourceLabel(), recipe.inputCost(),
-                                stacks, matIds, recipe, false
-                        ));
+                                stacks, matIds, recipe, false));
                     }
                 }
             } else {
@@ -148,8 +276,7 @@ public final class UncraftingRecipeResolver {
                 }
                 out.add(new ConcreteOutput(
                         recipe.id(), recipe.sourceLabel(), recipe.inputCost(),
-                        stacks, matIds, recipe, true
-                ));
+                        stacks, matIds, recipe, true));
             }
         }
         return out;
@@ -171,56 +298,117 @@ public final class UncraftingRecipeResolver {
     }
 
     /**
-     * Find all valid uncrafting recipe options for the given input stack, sorted by best default match.
+     * Find all valid uncrafting recipe options for the given input stack, sorted by
+     * best default match.
      */
     public static List<ResolvedRecipe> findRecipes(
             Level level,
             ItemStack inputStack,
             boolean hasSmoker,
-            boolean hasBlastFurnace
-    ) {
-        List<ResolvedRecipe> resolved = new ArrayList<>();
+            boolean hasBlastFurnace) {
         if (level == null || inputStack.isEmpty()) {
-            return resolved;
+            return List.of();
         }
 
-        // 1. Iron's Gems 'n Jewelry (component-driven crafting via Jewelcrafting Station)
-        tryResolveIronsJewelry(inputStack).ifPresent(resolved::add);
+        // 1. Iron's Gems 'n Jewelry (component-driven crafting via Jewelcrafting
+        // Station)
+        Optional<ResolvedRecipe> jewelry = tryResolveIronsJewelry(inputStack);
 
-        // 1b. Potion Brewing preview support (actual uncrafting requires 3 identical bottles + Brewing Stand)
-        if (inputStack.is(Items.POTION) || inputStack.is(Items.SPLASH_POTION) || inputStack.is(Items.LINGERING_POTION)) {
-            tryResolvePotionPreview(level, inputStack).ifPresent(resolved::add);
-            return resolved;
+        // 1b. Potion Brewing preview support (actual uncrafting requires 3 identical
+        // bottles + Brewing Stand)
+        if (inputStack.is(Items.POTION) || inputStack.is(Items.SPLASH_POTION)
+                || inputStack.is(Items.LINGERING_POTION)) {
+            Optional<ResolvedRecipe> potion = tryResolvePotionPreview(level, inputStack);
+            if (jewelry.isEmpty()) {
+                return potion.map(List::of).orElse(List.of());
+            }
+            List<ResolvedRecipe> combined = new ArrayList<>(2);
+            jewelry.ifPresent(combined::add);
+            potion.ifPresent(combined::add);
+            return combined;
         }
 
-        // 2. Vanilla & Modded RecipeManager recipes
+        // 2. Vanilla & Modded RecipeManager recipes (O(1) cached index per
+        // RecipeManager)
         RegistryAccess access = level.registryAccess();
-        String itemNamespace = BuiltInRegistries.ITEM.getKey(inputStack.getItem()).getNamespace();
+        Item item = inputStack.getItem();
+        IndexedRecipes index = getOrBuildIndex(level.getRecipeManager(), access);
+        List<ResolvedRecipe> fromManager = index.resolvedCache.computeIfAbsent(
+                new QueryKey(item, hasSmoker, hasBlastFurnace),
+                key -> resolveIndexedCandidates(index, access, key.item(), key.hasSmoker(), key.hasBlastFurnace()));
 
-        List<CandidateRecipe> candidates = new ArrayList<>();
-        for (RecipeHolder<?> holder : level.getRecipeManager().getRecipes()) {
-            inspectCandidate(holder.id(), holder.value(), access, itemNamespace, inputStack, hasSmoker, hasBlastFurnace)
+        if (jewelry.isEmpty()) {
+            return fromManager;
+        }
+        List<ResolvedRecipe> combined = new ArrayList<>(1 + fromManager.size());
+        combined.add(jewelry.get());
+        combined.addAll(fromManager);
+        return combined;
+    }
+
+    private static IndexedRecipes getOrBuildIndex(RecipeManager manager, RegistryAccess access) {
+        Collection<RecipeHolder<?>> recipes = manager.getRecipes();
+        int size = recipes.size();
+        IndexedRecipes existing = MANAGER_INDEX_CACHE.get(manager);
+        if (existing != null && existing.recipesRef == recipes && existing.recipesSize == size) {
+            return existing;
+        }
+
+        synchronized (manager) {
+            existing = MANAGER_INDEX_CACHE.get(manager);
+            if (existing != null && existing.recipesRef == recipes && existing.recipesSize == size) {
+                return existing;
+            }
+            Map<Item, List<RecipeHolder<?>>> byResult = new HashMap<>(Math.max(16, size));
+            for (RecipeHolder<?> holder : recipes) {
+                try {
+                    ItemStack result = extractPrimaryResult(holder.value(), access, ItemStack.EMPTY);
+                    if (!result.isEmpty()) {
+                        byResult.computeIfAbsent(result.getItem(), k -> new ArrayList<>(2)).add(holder);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            IndexedRecipes built = new IndexedRecipes(recipes, size, byResult);
+            MANAGER_INDEX_CACHE.put(manager, built);
+            return built;
+        }
+    }
+
+    private static List<ResolvedRecipe> resolveIndexedCandidates(
+            IndexedRecipes index,
+            RegistryAccess access,
+            Item item,
+            boolean hasSmoker,
+            boolean hasBlastFurnace) {
+        List<RecipeHolder<?>> matching = index.byResultItem.get(item);
+        if (matching == null || matching.isEmpty()) {
+            return List.of();
+        }
+        ItemStack probe = new ItemStack(item);
+        String itemNamespace = BuiltInRegistries.ITEM.getKey(item).getNamespace();
+        List<CandidateRecipe> candidates = new ArrayList<>(matching.size());
+        for (RecipeHolder<?> holder : matching) {
+            inspectCandidate(holder.id(), holder.value(), access, itemNamespace, probe, hasSmoker, hasBlastFurnace)
                     .ifPresent(candidates::add);
         }
-
         candidates.sort(
                 Comparator.comparingInt((CandidateRecipe c) -> c.tier)
                         .thenComparing((CandidateRecipe c) -> !c.sameNamespace)
                         .thenComparingInt(c -> c.inputCost == 9 ? 1 : 0)
                         .thenComparing((CandidateRecipe c) -> -c.totalIngs)
                         .thenComparingInt(c -> c.inputCost)
-                        .thenComparing(c -> c.id.toString())
-        );
-
+                        .thenComparing(c -> c.id.toString()));
+        List<ResolvedRecipe> resolved = new ArrayList<>(candidates.size());
         for (CandidateRecipe c : candidates) {
             resolved.add(c.toResolved());
         }
-
-        return resolved;
+        return List.copyOf(resolved);
     }
 
     /**
-     * Inspect a single recipe against an input item, returning a ResolvedRecipe if valid for uncrafting.
+     * Inspect a single recipe against an input item, returning a ResolvedRecipe if
+     * valid for uncrafting.
      */
     public static Optional<ResolvedRecipe> resolveSingleRecipe(
             ResourceLocation recipeId,
@@ -228,8 +416,7 @@ public final class UncraftingRecipeResolver {
             RegistryAccess access,
             ItemStack inputStack,
             boolean hasSmoker,
-            boolean hasBlastFurnace
-    ) {
+            boolean hasBlastFurnace) {
         if (recipeId == null || recipe == null || inputStack.isEmpty()) {
             return Optional.empty();
         }
@@ -245,8 +432,7 @@ public final class UncraftingRecipeResolver {
             String itemNamespace,
             ItemStack inputStack,
             boolean hasSmoker,
-            boolean hasBlastFurnace
-    ) {
+            boolean hasBlastFurnace) {
         try {
             RecipeType<?> type = recipe.getType();
 
@@ -258,10 +444,7 @@ public final class UncraftingRecipeResolver {
             if (type == RecipeType.BLASTING && !hasBlastFurnace) {
                 return Optional.empty();
             }
-            if ((type == RecipeType.SMOKING || type == RecipeType.CAMPFIRE_COOKING) && !hasSmoker) {
-                return Optional.empty();
-            }
-            if (type == RecipeType.SMELTING && result.has(DataComponents.FOOD) && !hasSmoker) {
+            if (!hasSmoker && isSmokerRequired(type, result)) {
                 return Optional.empty();
             }
 
@@ -287,8 +470,7 @@ public final class UncraftingRecipeResolver {
                     groups,
                     totalIngs,
                     tier,
-                    recipeId.getNamespace().equals(itemNamespace)
-            ));
+                    recipeId.getNamespace().equals(itemNamespace)));
         } catch (Exception ignored) {
             return Optional.empty();
         }
@@ -301,8 +483,7 @@ public final class UncraftingRecipeResolver {
             List<IngredientGroup> groups,
             int totalIngs,
             int tier,
-            boolean sameNamespace
-    ) {
+            boolean sameNamespace) {
         ResolvedRecipe toResolved() {
             return new ResolvedRecipe(id, label, inputCost, groups, totalIngs);
         }
@@ -326,13 +507,20 @@ public final class UncraftingRecipeResolver {
     }
 
     private static String formatSourceLabel(RecipeType<?> type, ResourceLocation recipeId) {
-        if (type == RecipeType.CRAFTING) return "Crafting";
-        if (type == RecipeType.SMITHING) return "Smithing";
-        if (type == RecipeType.BLASTING) return "Blasting";
-        if (type == RecipeType.SMOKING) return "Smoking";
-        if (type == RecipeType.CAMPFIRE_COOKING) return "Campfire";
-        if (type == RecipeType.SMELTING) return "Smelting";
-        if (type == RecipeType.STONECUTTING) return "Stonecutting";
+        if (type == RecipeType.CRAFTING)
+            return "Crafting";
+        if (type == RecipeType.SMITHING)
+            return "Smithing";
+        if (type == RecipeType.BLASTING)
+            return "Blasting";
+        if (type == RecipeType.SMOKING)
+            return "Smoking";
+        if (type == RecipeType.CAMPFIRE_COOKING)
+            return "Campfire";
+        if (type == RecipeType.SMELTING)
+            return "Smelting";
+        if (type == RecipeType.STONECUTTING)
+            return "Stonecutting";
 
         ResourceLocation typeKey = BuiltInRegistries.RECIPE_TYPE.getKey(type);
         String raw = typeKey != null ? typeKey.getPath() : recipeId.getPath();
@@ -344,7 +532,8 @@ public final class UncraftingRecipeResolver {
         StringBuilder sb = new StringBuilder();
         for (String p : parts) {
             if (!p.isEmpty()) {
-                if (!sb.isEmpty()) sb.append(' ');
+                if (!sb.isEmpty())
+                    sb.append(' ');
                 sb.append(Character.toUpperCase(p.charAt(0))).append(p.substring(1));
             }
         }
@@ -356,11 +545,13 @@ public final class UncraftingRecipeResolver {
     }
 
     /**
-     * Resolve the base potion stack (count 3) and brewing reagent (count 1) for a potion, or empty if base Water Bottle.
+     * Resolve the base potion stack (count 3) and brewing reagent (count 1) for a
+     * potion, or empty if base Water Bottle.
      */
     @SuppressWarnings("unchecked")
     public static Optional<PotionStep> resolvePotionOutputs(Level level, ItemStack inputStack) {
-        if (level == null || inputStack.isEmpty()) return Optional.empty();
+        if (level == null || inputStack.isEmpty())
+            return Optional.empty();
         PotionContents contents = inputStack.get(DataComponents.POTION_CONTENTS);
 
         ItemStack bottle = null;
@@ -368,11 +559,13 @@ public final class UncraftingRecipeResolver {
 
         if (inputStack.is(Items.LINGERING_POTION)) {
             bottle = new ItemStack(Items.SPLASH_POTION);
-            if (contents != null) bottle.set(DataComponents.POTION_CONTENTS, contents);
+            if (contents != null)
+                bottle.set(DataComponents.POTION_CONTENTS, contents);
             reagent = new ItemStack(Items.DRAGON_BREATH);
         } else if (inputStack.is(Items.SPLASH_POTION)) {
             bottle = new ItemStack(Items.POTION);
-            if (contents != null) bottle.set(DataComponents.POTION_CONTENTS, contents);
+            if (contents != null)
+                bottle.set(DataComponents.POTION_CONTENTS, contents);
             reagent = new ItemStack(Items.GUNPOWDER);
         } else {
             try {
@@ -407,7 +600,8 @@ public final class UncraftingRecipeResolver {
 
                                 if (fromVal instanceof Holder<?> fromHolder) {
                                     bottle = new ItemStack(Items.POTION);
-                                    bottle.set(DataComponents.POTION_CONTENTS, new PotionContents((Holder<Potion>) fromHolder));
+                                    bottle.set(DataComponents.POTION_CONTENTS,
+                                            new PotionContents((Holder<Potion>) fromHolder));
                                 }
                                 if (ing != null && ing.getItems().length > 0) {
                                     reagent = new ItemStack(ing.getItems()[0].getItem());
@@ -439,21 +633,21 @@ public final class UncraftingRecipeResolver {
         return resolvePotionOutputs(level, stack).map(step -> {
             List<IngredientGroup> groups = List.of(
                     new IngredientGroup(List.of(step.baseBottles().copyWithCount(1)), step.baseBottles().getCount()),
-                    new IngredientGroup(List.of(step.reagent().copyWithCount(1)), step.reagent().getCount())
-            );
+                    new IngredientGroup(List.of(step.reagent().copyWithCount(1)), step.reagent().getCount()));
             return new ResolvedRecipe(
                     ResourceLocation.withDefaultNamespace("brewing"),
                     "Brewing (3x)",
                     3,
                     groups,
-                    4
-            );
+                    4);
         });
     }
 
     /**
-     * Soft-integration for Iron's Gems 'n Jewelry (irons_jewelry:jewelry_data component).
-     * Reads PatternDefinition.partTemplate() and JewelryData.parts() via reflection so no hard dependency is needed.
+     * Soft-integration for Iron's Gems 'n Jewelry (irons_jewelry:jewelry_data
+     * component).
+     * Reads PatternDefinition.partTemplate() and JewelryData.parts() via reflection
+     * so no hard dependency is needed.
      */
     @SuppressWarnings("unchecked")
     private static Optional<ResolvedRecipe> tryResolveIronsJewelry(ItemStack stack) {
@@ -465,7 +659,8 @@ public final class UncraftingRecipeResolver {
     }
 
     /**
-     * Reflectively extract materials from an Iron's Gems 'n Jewelry JewelryData instance.
+     * Reflectively extract materials from an Iron's Gems 'n Jewelry JewelryData
+     * instance.
      */
     public static Optional<ResolvedRecipe> resolveIronsJewelryData(Object jewelryData) {
         if (jewelryData == null) {
@@ -494,7 +689,8 @@ public final class UncraftingRecipeResolver {
             for (Object partIng : partTemplate) {
                 Object partHolder = partIng.getClass().getMethod("part").invoke(partIng);
                 int cost = ((Number) partIng.getClass().getMethod("materialCost").invoke(partIng)).intValue();
-                if (cost <= 0) continue;
+                if (cost <= 0)
+                    continue;
 
                 Object matHolderObj = partsMap.get(partHolder);
                 if (matHolderObj instanceof Holder<?> matHolder) {
@@ -530,52 +726,44 @@ public final class UncraftingRecipeResolver {
         } catch (Exception ignored) {
         }
 
-        // Reflection fallback for modded recipes that store results in custom fields/methods
-        Class<?> cls = recipe.getClass();
-        while (cls != null && cls != Object.class) {
-            for (String mName : new String[]{"getResult", "result", "getOutput", "output", "getOutputItem", "outputItem"}) {
-                try {
-                    Method m = cls.getDeclaredMethod(mName);
-                    m.setAccessible(true);
-                    ItemStack found = unwrapOutputObject(m.invoke(recipe), target);
-                    if (!found.isEmpty()) return found;
-                } catch (Exception ignored) {
-                }
+        // Cached reflection lookup (zero NoSuchMethodException allocations in hot
+        // loops)
+        RecipeReflectMeta meta = RecipeReflectMeta.get(recipe.getClass());
+        for (Method m : meta.singleOutMethods()) {
+            try {
+                ItemStack found = unwrapOutputObject(m.invoke(recipe), target);
+                if (!found.isEmpty())
+                    return found;
+            } catch (Exception ignored) {
             }
-
-            for (String mName : new String[]{"getResults", "getRollableResults", "results", "outputs"}) {
-                try {
-                    Method m = cls.getDeclaredMethod(mName);
-                    m.setAccessible(true);
-                    ItemStack found = unwrapOutputList(m.invoke(recipe), target);
-                    if (!found.isEmpty()) return found;
-                } catch (Exception ignored) {
-                }
+        }
+        for (Method m : meta.listOutMethods()) {
+            try {
+                ItemStack found = unwrapOutputList(m.invoke(recipe), target);
+                if (!found.isEmpty())
+                    return found;
+            } catch (Exception ignored) {
             }
-
-            for (Field f : cls.getDeclaredFields()) {
-                String fname = f.getName().toLowerCase();
-                if (!(fname.contains("result") || fname.contains("output"))) {
-                    continue;
-                }
-                try {
-                    f.setAccessible(true);
-                    Object val = f.get(recipe);
-                    ItemStack found = unwrapOutputObject(val, target);
-                    if (!found.isEmpty()) return found;
-                    found = unwrapOutputList(val, target);
-                    if (!found.isEmpty()) return found;
-                } catch (Exception ignored) {
-                }
+        }
+        for (Field f : meta.outputFields()) {
+            try {
+                Object val = f.get(recipe);
+                ItemStack found = unwrapOutputObject(val, target);
+                if (!found.isEmpty())
+                    return found;
+                found = unwrapOutputList(val, target);
+                if (!found.isEmpty())
+                    return found;
+            } catch (Exception ignored) {
             }
-            cls = cls.getSuperclass();
         }
 
         return ItemStack.EMPTY;
     }
 
     private static ItemStack unwrapOutputObject(Object obj, ItemStack target) {
-        if (obj == null) return ItemStack.EMPTY;
+        if (obj == null)
+            return ItemStack.EMPTY;
         if (obj instanceof ItemStack stack && !stack.isEmpty()) {
             return stack;
         }
@@ -583,19 +771,22 @@ public final class UncraftingRecipeResolver {
             return unwrapOutputObject(opt.get(), target);
         }
         // Handle Create ProcessingOutput / wrapper with getStack() & getChance()
-        try {
-            Method getStack = obj.getClass().getMethod("getStack");
-            Object stackObj = getStack.invoke(obj);
-            if (stackObj instanceof ItemStack stack && !stack.isEmpty() && stack.getItem() == target.getItem()) {
-                try {
-                    Method getChance = obj.getClass().getMethod("getChance");
-                    float chance = ((Number) getChance.invoke(obj)).floatValue();
-                    if (chance < 0.999f) return ItemStack.EMPTY;
-                } catch (NoSuchMethodException ignored) {
+        WrapperMeta wMeta = WrapperMeta.get(obj.getClass());
+        if (wMeta.getStackMethod() != null) {
+            try {
+                Object stackObj = wMeta.getStackMethod().invoke(obj);
+                boolean itemMatches = target == null || target.isEmpty()
+                        || (stackObj instanceof ItemStack st && st.getItem() == target.getItem());
+                if (stackObj instanceof ItemStack stack && !stack.isEmpty() && itemMatches) {
+                    if (wMeta.getChanceMethod() != null) {
+                        float chance = ((Number) wMeta.getChanceMethod().invoke(obj)).floatValue();
+                        if (chance < 0.999f)
+                            return ItemStack.EMPTY;
+                    }
+                    return stack;
                 }
-                return stack;
+            } catch (Exception ignored) {
             }
-        } catch (Exception ignored) {
         }
         return ItemStack.EMPTY;
     }
@@ -604,7 +795,8 @@ public final class UncraftingRecipeResolver {
         if (!(obj instanceof Collection<?> col) || col.isEmpty()) {
             return ItemStack.EMPTY;
         }
-        // Only treat single-output deterministic recipes cleanly to avoid byproduct dupes
+        // Only treat single-output deterministic recipes cleanly to avoid byproduct
+        // dupes
         if (col.size() == 1) {
             Object only = col.iterator().next();
             return unwrapOutputObject(only, target);
@@ -617,11 +809,14 @@ public final class UncraftingRecipeResolver {
         if (recipe instanceof SmithingTransformRecipe) {
             List<RawIngredient> smithing = new ArrayList<>();
             extractFieldIngredients(recipe, smithing, new ArrayList<>());
-            if (!smithing.isEmpty()) return smithing;
+            if (!smithing.isEmpty())
+                return smithing;
         }
 
-        // Standard vanilla crafting/cooking/stonecutting recipes use getIngredients() directly
-        if (recipe instanceof CraftingRecipe || recipe instanceof AbstractCookingRecipe || recipe instanceof SingleItemRecipe) {
+        // Standard vanilla crafting/cooking/stonecutting recipes use getIngredients()
+        // directly
+        if (recipe instanceof CraftingRecipe || recipe instanceof AbstractCookingRecipe
+                || recipe instanceof SingleItemRecipe) {
             List<RawIngredient> vanilla = new ArrayList<>();
             try {
                 for (Ingredient ing : recipe.getIngredients()) {
@@ -631,10 +826,12 @@ public final class UncraftingRecipeResolver {
                 }
             } catch (Exception ignored) {
             }
-            if (!vanilla.isEmpty()) return vanilla;
+            if (!vanilla.isEmpty())
+                return vanilla;
         }
 
-        // Modded recipes: separate counted (SizedIngredient) fields from plain Ingredient fields to avoid double-counting caches
+        // Modded recipes: separate counted (SizedIngredient) fields from plain
+        // Ingredient fields to avoid double-counting caches
         List<RawIngredient> sizedFound = new ArrayList<>();
         List<RawIngredient> plainFound = new ArrayList<>();
         extractFieldIngredients(recipe, plainFound, sizedFound);
@@ -662,28 +859,19 @@ public final class UncraftingRecipeResolver {
     private static void extractFieldIngredients(
             Recipe<?> recipe,
             List<RawIngredient> plainOut,
-            List<RawIngredient> sizedOut
-    ) {
-        Class<?> cls = recipe.getClass();
-        while (cls != null && cls != Object.class) {
-            for (Field f : cls.getDeclaredFields()) {
-                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
-                String name = f.getName().toLowerCase();
-                if (name.contains("result") || name.contains("output") || name.contains("rollable")) {
-                    continue;
-                }
-                try {
-                    f.setAccessible(true);
-                    collectIngredientValue(f.get(recipe), plainOut, sizedOut);
-                } catch (Exception ignored) {
-                }
+            List<RawIngredient> sizedOut) {
+        RecipeReflectMeta meta = RecipeReflectMeta.get(recipe.getClass());
+        for (Field f : meta.inputFields()) {
+            try {
+                collectIngredientValue(f.get(recipe), plainOut, sizedOut);
+            } catch (Exception ignored) {
             }
-            cls = cls.getSuperclass();
         }
     }
 
     private static void collectIngredientValue(Object val, List<RawIngredient> plainOut, List<RawIngredient> sizedOut) {
-        if (val == null) return;
+        if (val == null)
+            return;
 
         if (val instanceof SizedIngredient sized) {
             if (!sized.ingredient().isEmpty() && sized.count() > 0) {
@@ -721,39 +909,76 @@ public final class UncraftingRecipeResolver {
             return;
         }
 
-        // Duck-type third-party counted ingredient wrappers (e.g. ingredient() + count()/amount())
-        try {
-            Method mIng = val.getClass().getMethod("ingredient");
-            Object inner = mIng.invoke(val);
-            if (inner instanceof Ingredient ing && !ing.isEmpty()) {
-                int count = 1;
-                for (String cName : new String[]{"count", "amount", "getCount", "getAmount"}) {
-                    try {
-                        count = Math.max(1, ((Number) val.getClass().getMethod(cName).invoke(val)).intValue());
-                        break;
-                    } catch (NoSuchMethodException ignored) {
+        // Duck-type third-party counted ingredient wrappers (e.g. ingredient() +
+        // count()/amount()) using cached metadata
+        WrapperMeta wMeta = WrapperMeta.get(val.getClass());
+        if (wMeta.ingredientMethod() != null) {
+            try {
+                Object inner = wMeta.ingredientMethod().invoke(val);
+                if (inner instanceof Ingredient ing && !ing.isEmpty()) {
+                    int count = 1;
+                    if (wMeta.countMethod() != null) {
+                        count = Math.max(1, ((Number) wMeta.countMethod().invoke(val)).intValue());
                     }
+                    sizedOut.add(new RawIngredient(ing, List.of(), count));
                 }
-                sizedOut.add(new RawIngredient(ing, List.of(), count));
+            } catch (Exception ignored) {
             }
-        } catch (Exception ignored) {
         }
     }
 
     private static boolean containsSelfReference(List<RawIngredient> rawInputs, ItemStack target) {
-        ItemStack probe = new ItemStack(target.getItem());
+        Item targetItem = target.getItem();
+        ItemStack probe = new ItemStack(targetItem);
         for (RawIngredient ri : rawInputs) {
             if (ri.ingredient != null) {
                 try {
-                    if (ri.ingredient.test(probe)) return true;
+                    if (ri.ingredient.test(probe) || (!target.isEmpty() && ri.ingredient.test(target))) {
+                        return true;
+                    }
+                    // Also inspect resolved stacks: DataComponent/custom upgrade ingredients return
+                    // false on
+                    // bare probes yet still emit targetItem variants in groupIngredients().
+                    ItemStack[] items = ri.ingredient.getItems();
+                    if (items != null) {
+                        for (ItemStack s : items) {
+                            if (!s.isEmpty() && s.getItem() == targetItem) {
+                                return true;
+                            }
+                        }
+                    }
                 } catch (Exception ignored) {
                 }
             }
             for (ItemStack s : ri.explicitStacks) {
-                if (s.getItem() == target.getItem()) return true;
+                if (!s.isEmpty() && s.getItem() == targetItem) {
+                    return true;
+                }
             }
         }
         return false;
+    }
+
+    /**
+     * Require Smoker modifier for vanilla smoking/campfire and modded
+     * smelting/smoking of food items.
+     */
+    private static boolean isSmokerRequired(RecipeType<?> type, ItemStack result) {
+        if (type == RecipeType.SMOKING || type == RecipeType.CAMPFIRE_COOKING) {
+            return true;
+        }
+        if (!result.has(DataComponents.FOOD)) {
+            return false;
+        }
+        if (type == RecipeType.SMELTING) {
+            return true;
+        }
+        ResourceLocation typeId = BuiltInRegistries.RECIPE_TYPE.getKey(type);
+        if (typeId == null) {
+            return false;
+        }
+        String path = typeId.getPath();
+        return path.contains("smelt") || path.contains("smok");
     }
 
     private static List<IngredientGroup> groupIngredients(List<RawIngredient> rawInputs) {
@@ -786,7 +1011,8 @@ public final class UncraftingRecipeResolver {
                 dedup.putIfAbsent(itemId, st);
             }
 
-            // Prefer non-blacklisted alternatives when a tag contains blacklisted items alongside normal ones
+            // Prefer non-blacklisted alternatives when a tag contains blacklisted items
+            // alongside normal ones
             List<ItemStack> nonBlacklisted = dedup.values().stream()
                     .filter(s -> !s.is(UncraftingTableBlockEntity.BLACKLIST_TAG))
                     .toList();

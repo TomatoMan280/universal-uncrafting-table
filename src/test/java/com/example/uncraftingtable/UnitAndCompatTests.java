@@ -220,6 +220,20 @@ public class UnitAndCompatTests {
         );
         assertTrue(UncraftingRecipeResolver.resolveSingleRecipe(
                 id, selfLoop, emptyAccess, new ItemStack(Items.IRON_BLOCK), false, false).isEmpty());
+
+        // DataComponent/upgrade self-loop (test(bare) == false yet getItems() emits IRON_BLOCK) must also be blocked
+        ItemStack upgradedBlock = new ItemStack(Items.IRON_BLOCK);
+        upgradedBlock.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
+                net.minecraft.network.chat.Component.literal("Upgraded Tier"));
+        Ingredient strictComponentIng = net.neoforged.neoforge.common.crafting.DataComponentIngredient.of(true, upgradedBlock);
+        assertFalse(strictComponentIng.test(new ItemStack(Items.IRON_BLOCK)));
+        CustomSizedRecipe componentSelfLoop = new CustomSizedRecipe(
+                new SizedIngredient(strictComponentIng, 1),
+                new CustomProcessingOutput(new ItemStack(Items.IRON_BLOCK), 1.0f)
+        );
+        assertTrue(UncraftingRecipeResolver.resolveSingleRecipe(
+                id, componentSelfLoop, emptyAccess, new ItemStack(Items.IRON_BLOCK), false, false).isEmpty(),
+                "Component-filtered upgrade recipe emitting input item must be blocked as a self-loop");
     }
 
     @Test
